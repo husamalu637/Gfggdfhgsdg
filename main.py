@@ -1,74 +1,53 @@
-import telebot
-import requests
-import math
-import time
+import telebot, requests, math, time
 
-# --- الإعدادات ---
+# الإعدادات
 API_KEY = 'Be9acf1ac42f43bc9c7599d2c8588ec9'
 BOT_TOKEN = '8557316031:AAFKVZdf0oDHZExhPqop_RRapxw4ZAjs2MQ'
-LEAGUES = ['PL', 'PD', 'SA', 'BL1', 'FL1', 'CL'] # الدوريات الكبرى
+LEAGUES = ['PL', 'PD', 'SA', 'BL1', 'FL1', 'CL']
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-def calculate_poisson(actual, mean):
-    """معادلة بواسون يدوية لتوفير المساحة: (e^-mean * mean^actual) / factorial(actual)"""
-    try:
-        return (math.exp(-mean) * pow(mean, actual)) / math.factorial(actual)
-    except:
-        return 0
-
-def get_data(endpoint):
-    url = f"https://api.football-data.org/v4/{endpoint}"
-    headers = {'X-Auth-Token': API_KEY}
-    try:
-        r = requests.get(url, headers=headers, timeout=15)
-        return r.json() if r.status_code == 200 else None
-    except:
-        return None
+def poisson(k, m):
+    """معادلة بواسون يدوية خفيفة جداً"""
+    return (math.exp(-m) * pow(m, k)) / math.factorial(k)
 
 @bot.message_handler(commands=['start'])
-def start_radar(message):
-    bot.send_message(message.chat.id, "🔍 جاري تشغيل الرادار... جاري فحص جميع الدوريات الكبرى عن فرص تتجاوز 60%.")
-    
-    results = ""
-    for league in LEAGUES:
-        standings = get_data(f"competitions/{league}/standings")
-        matches = get_data(f"competitions/{league}/matches?status=SCHEDULED")
-        
-        if not standings or not matches: continue
-        
-        table = {t['team']['name']: t for t in standings['standings'][0]['table']}
-        
-        for m in matches['matches'][:10]:
-            h_name, a_name = m['homeTeam']['name'], m['awayTeam']['name']
+def run_radar(message):
+    bot.send_message(message.chat.id, "📡 جاري فحص الدوريات عن فرص > 60%...")
+    report = ""
+    for lg in LEAGUES:
+        try:
+            # جلب البيانات
+            s_url = f"https://api.football-data.org/v4/competitions/{lg}/standings"
+            m_url = f"https://api.football-data.org/v4/competitions/{lg}/matches?status=SCHEDULED"
+            h = {'X-Auth-Token': API_KEY}
             
-            if h_name in table and a_name in table:
-                h, a = table[h_name], table[a_name]
-                
-                # حساب Lambda (متوسط الأهداف المتوقع)
-                exp_h = (h['goalsFor']/max(h['playedGames'],1)) * (a['goalsAgainst']/max(a['playedGames'],1)) * 1.1
-                exp_a = (a['goalsFor']/max(a['playedGames'],1)) * (h['goalsAgainst']/max(h['playedGames'],1))
-                
-                p_win, p_loss = 0, 0
-                for gh in range(5):
-                    for ga in range(5):
-                        prob = calculate_poisson(gh, exp_h) * calculate_poisson(ga, exp_a)
-                        if gh > ga: p_win += prob
-                        elif ga > gh: p_loss += prob
-                
-                win_pct, loss_pct = p_win * 100, p_loss * 100
-                
-                # فلتر القيمة (تجاوز 60%)
-                if win_pct >= 60 or loss_pct >= 60:
-                    side = "🏠 صاحب الأرض" if win_pct > loss_pct else "🚀 الضيف"
-                    chance = max(win_pct, loss_pct)
-                    results += f"🏆 {league} | {h_name} × {a_name}\n📈 الثقة: {chance:.1f}% ({side})\n---\n"
+            standings = requests.get(s_url, headers=h).json()
+            matches = requests.get(m_url, headers=h).json()
+            
+            table = {t['team']['name']: t for t in standings['standings'][0]['table']}
+            
+            for m in matches['matches'][:10]:
+                h_n, a_n = m['homeTeam']['name'], m['awayTeam']['name']
+                if h_n in table and a_n in table:
+                    h_s, a_s = table[h_n], table[a_n]
+                    # حساب القوة المتوقعة
+                    eh = (h_s['goalsFor']/h_s['playedGames']) * (a_s['goalsAgainst']/a_s['playedGames']) * 1.1
+                    ea = (a_s['goalsFor']/a_s['playedGames']) * (h_s['goalsAgainst']/h_s['playedGames'])
+                    
+                    p_win, p_loss = 0, 0
+                    for i in range(5):
+                        for j in range(5):
+                            prob = poisson(i, eh) * poisson(j, ea)
+                            if i > j: p_win += prob
+                            elif j > i: p_loss += prob
+                    
+                    if p_win > 0.6 or p_loss > 0.6:
+                        side = "🏠" if p_win > p_loss else "🚀"
+                        report += f"🏆 {lg} | {h_n} × {a_n}\n📈 الثقة: {max(p_win, p_loss)*100:.1f}% {side}\n---\n"
+        except: continue
 
-    if results:
-        bot.send_message(message.chat.id, "🚀 **الفرص الذهبية المكتشفة:**\n\n" + results, parse_mode="Markdown")
-    else:
-        bot.send_message(message.chat.id, "⚠️ لا توجد مباريات قوية حالياً تتخطى 60%.")
+    bot.send_message(message.chat.id, report if report else "⚠️ لا توجد مباريات قوية حالياً.")
 
 if __name__ == "__main__":
     bot.polling(none_stop=True)
-    
