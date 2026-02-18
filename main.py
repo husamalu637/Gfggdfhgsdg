@@ -3,17 +3,18 @@ import requests
 import math
 import time
 
-# --- الإعدادات (ضع مفاتيحك هنا) ---
+# --- الإعدادات (تأكد من صحة المفاتيح) ---
 API_KEY = 'Be9acf1ac42f43bc9c7599d2c8588ec9'
 BOT_TOKEN = '8557316031:AAFKVZdf0oDHZExhPqop_RRapxw4ZAjs2MQ'
-# قائمة الدوريات التي سيقوم البوت بمسحها تلقائياً
+# الدوريات التي سيفحصها البوت تلقائياً
 LEAGUES = ['PL', 'PD', 'SA', 'BL1', 'FL1', 'CL'] 
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
 def poisson_prob(actual, mean):
-    """حساب معادلة بواسون يدوياً لتوفير المساحة والكفاءة"""
+    """حساب توزيع بواسون رياضياً بدون مكتبات خارجية"""
     try:
+        # المعادلة: (e^-mean * mean^actual) / actual!
         return (math.exp(-mean) * pow(mean, actual)) / math.factorial(actual)
     except: return 0
 
@@ -25,79 +26,82 @@ def get_data(endpoint):
         return r.json() if r.status_code == 200 else None
     except: return None
 
-def scan_all_leagues():
-    """وظيفة المسح الشامل للبحث عن الفرص الذهبية > 60%"""
-    value_matches = []
+def scan_value_matches():
+    """مسح شامل للدوريات للبحث عن فرص > 60%"""
+    value_list = []
     for league in LEAGUES:
         standings_data = get_data(f"competitions/{league}/standings")
         matches_data = get_data(f"competitions/{league}/matches?status=SCHEDULED")
         
         if not standings_data or not matches_data: continue
 
-        # تنظيم ترتيب الدوري في قاموس ليسهل الوصول إليه
-        standings = {item['team']['name']: item for item in standings_data['standings'][0]['table']}
+        # ترتيب الفرق
+        table = standings_data['standings'][0]['table']
+        standings = {item['team']['name']: item for item in table}
         
-        # فحص أول 10 مباريات قادمة في كل دوري
-        for match in matches_data['matches'][:10]:
-            h_name = match['homeTeam']['name']
-            a_name = match['awayTeam']['name']
+        for match in matches_data['matches'][:12]: # فحص القادم
+            h_team = match['homeTeam']['name']
+            a_team = match['awayTeam']['name']
             
-            if h_name in standings and a_name in standings:
-                h, a = standings[h_name], standings[a_name]
+            if h_team in standings and a_team in standings:
+                h_stat, a_stat = standings[h_team], standings[a_team]
                 
                 # حساب متوسط الأهداف المتوقع (Lambda)
-                exp_h = (h['goalsFor']/h['playedGames']) * (a['goalsAgainst']/a['playedGames']) * 1.1
-                exp_a = (a['goalsFor']/a['playedGames']) * (h['goalsAgainst']/h['playedGames'])
+                # ضربنا في 1.1 لتعويض عامل الأرض
+                exp_h = (h_stat['goalsFor']/h_stat['playedGames']) * (a_stat['goalsAgainst']/a_stat['playedGames']) * 1.1
+                exp_a = (a_stat['goalsFor']/a_stat['playedGames']) * (h_stat['goalsAgainst']/h_stat['playedGames'])
                 
                 p_win, p_loss = 0, 0
-                score_probs = []
+                all_scores = []
                 
-                # حساب الاحتمالات لجميع النتائج من 0-0 إلى 4-4
+                # مصفوفة النتائج الممكنة
                 for gh in range(5):
                     for ga in range(5):
-                        p = poisson_prob(gh, exp_h) * poisson_prob(ga, exp_a)
-                        if gh > ga: p_win += p
-                        elif ga > gh: p_loss += p
-                        score_probs.append((f"{gh}-{ga}", p * 100))
+                        prob = poisson_prob(gh, exp_h) * poisson_prob(ga, exp_a)
+                        if gh > ga: p_win += prob
+                        elif ga > gh: p_loss += prob
+                        all_scores.append((f"{gh}-{ga}", prob * 100))
                 
-                # تحديد النسبة الأعلى (فوز صاحب الأرض أو الضيف)
-                max_prob = max(p_win, p_loss) * 100
+                # تحديد النسبة الأعلى وفحص فلتر الـ 60%
+                win_chance = p_win * 100
+                loss_chance = p_loss * 100
+                max_chance = max(win_chance, loss_chance)
                 
-                # فلتر القيمة: فقط المباريات التي تتخطى 60%
-                if max_prob >= 60:
-                    score_probs.sort(key=lambda x: x[1], reverse=True)
-                    value_matches.append({
+                if max_chance >= 60:
+                    all_scores.sort(key=lambda x: x[1], reverse=True)
+                    value_list.append({
                         'league': league,
-                        'match': f"{h_name} × {a_name}",
-                        'prob': max_prob,
-                        'side': "🏠 فوز الأرض" if p_win > p_loss else "🚀 فوز الضيف",
-                        'best_score': score_probs[0][0],
-                        'score_p': score_probs[0][1]
+                        'match': f"{h_team} × {a_team}",
+                        'prob': max_chance,
+                        'pick': "🏠 فوز الأرض" if win_chance > loss_chance else "🚀 فوز الضيف",
+                        'score': all_scores[0][0],
+                        'score_p': all_scores[0][1]
                     })
-    return value_matches
+    return value_list
 
 @bot.message_handler(commands=['start'])
-def start(message):
-    bot.send_message(message.chat.id, "🔍 جاري فحص جميع الدوريات الكبرى... سأرسل لك فقط الفرص التي تتجاوز نسبة نجاحها 60%.")
+def handle_start(message):
+    bot.send_message(message.chat.id, "🔍 جاري تشغيل الرادار... جاري فحص جميع الدوريات الكبرى عن فرص تتجاوز 60%.")
     
-    matches = scan_all_leagues()
+    found = scan_value_matches()
     
-    if not matches:
-        bot.send_message(message.chat.id, "⚠️ لا توجد مباريات بنسبة ثقة أعلى من 60% في الوقت الحالي.")
+    if not found:
+        bot.send_message(message.chat.id, "⚠️ لا توجد مباريات 'قوية رياضياً' حالياً (أعلى من 60%). جرب لاحقاً.")
         return
 
-    report = "🚀 **الفرص الذهبية المكتشفة (>60%):**\n\n"
-    for m in matches:
-        report += (f"🏆 الدوري: {m['league']}\n"
-                   f"🏟️ {m['match']}\n"
-                   f"📈 الثقة: {m['prob']:.1f}% ({m['side']})\n"
-                   f"🎯 النتيجة الأرجح: {m['best_score']} ({m['score_p']:.1f}%)\n"
-                   f"--------------------------\n")
+    msg = "🚀 **الفرص الذهبية الحالية (>60%):**\n\n"
+    for m in found:
+        msg += (f"🏆 الدوري: {m['league']}\n"
+                f"🏟️ {m['match']}\n"
+                f"📈 الثقة: {m['prob']:.1f}% ({m['pick']})\n"
+                f"🎯 النتيجة الأرجح: {m['score']} ({m['score_p']:.1f}%)\n"
+                f"--------------------------\n")
     
-    bot.send_message(message.chat.id, report, parse_mode="Markdown")
+    bot.send_message(message.chat.id, msg, parse_mode="Markdown")
 
 if __name__ == "__main__":
     while True:
         try:
             bot.polling(none_stop=True)
-        except: time.sleep(5)
+        except:
+            time.sleep(5)
